@@ -1,0 +1,138 @@
+pipeline {
+  agent any
+  options { timestamps() }
+
+  parameters {
+    string(name: 'IMAGE_REPO', defaultValue: 'satya66655/lab-app', description: 'docker.io/<namespace>/<name>')
+    string(name: 'IMAGE_TAG',  defaultValue: 'v1',                description: 'Image tag')
+    string(name: 'B_HOST',     defaultValue: '<B_PUBLIC_IP>',     description: 'Public IP or DNS of Instance B')
+    string(name: 'B_USER',     defaultValue: 'ec2-user',          description: 'SSH username on Instance B')
+    booleanParam(name: 'LOGIN_BEFORE_PUSH', defaultValue: true,   description: 'docker login on Instance B before push')
+  }
+
+  environment {
+    REGISTRY   = 'docker.io'
+    B_HOST     = "${params.B_HOST}"
+    B_USER     = "${params.B_USER}"
+    IMAGE_REPO = "${params.IMAGE_REPO}"
+    IMAGE_TAG  = "${params.IMAGE_TAG}"
+  }
+
+  stages {
+
+    stage('Checkout repo') {
+      steps {
+        checkout([$class: 'GitSCM',
+          branches: [[name: "*/main"]],
+          userRemoteConfigs: [[url: 'https://github.com/satya66655/jenkins-eks-labs.git', credentialsId: 'github-pat']]
+        ])
+      }
+    }
+
+    stage('Pack build context') {
+      steps {
+        sh '''
+          set -euo pipefail
+          if [ -d app ] && [ -d docker ]; then
+            tar -czf /tmp/build-context.tgz app docker
+          else
+            tar -czf /tmp/build-context.tgz .
+          fi
+          ls -lh /tmp/build-context.tgz
+        '''
+      }
+    }
+
+    stage('Copy context to Instance B') {
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'ec2b-ssh', keyFileVariable: 'KEYFILE')]) {
+          sh '''
+            set -euo pipefail
+            SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+            ssh $SSH_OPTS -i "$KEYFILE" "${B_USER}@${B_HOST}" "mkdir -p ~/jenkins-ctx"
+            scp $SSH_OPTS -i "$KEYFILE" /tmp/build-context.tgz "${B_USER}@${B_HOST}:~/jenkins-ctx/build-context.tgz"
+          '''
+        }
+      }
+    }
+
+    stage('Build & Push on Instance B') {
+      steps {
+        script {
+          if (params.LOGIN_BEFORE_PUSH) {
+            // With Docker Hub login
+            withCredentials([
+              sshUserPrivateKey(credentialsId: 'ec2b-ssh', keyFileVariable: 'KEYFILE'),
+              usernamePassword(credentialsId: 'dockerhub-satya', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')
+            ]) {
+              sh '''
+                set -euo pipefail
+                SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+                REMOTE="${B_USER}@${B_HOST}"
+
+                # --- BUILD on Instance B ---
+                ssh $SSH_OPTS -i "$KEYFILE" "$REMOTE" \
+                  REGISTRY="$REGISTRY" IMAGE_REPO="$IMAGE_REPO" IMAGE_TAG="$IMAGE_TAG" \
+                  'bash -s' <<'BUILD_EOF'
+                set -euo pipefail
+                cd ~/jenkins-ctx
+                rm -rf ctx && mkdir ctx
+                tar -xzf build-context.tgz -C ctx
+                cd ctx
+                docker --version
+                docker build -f docker/Dockerfile -t "${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}" .
+BUILD_EOF
+
+                # --- LOGIN & PUSH from Instance B ---
+                ssh $SSH_OPTS -i "$KEYFILE" "$REMOTE" \
+                  REGISTRY="$REGISTRY" IMAGE_REPO="$IMAGE_REPO" IMAGE_TAG="$IMAGE_TAG" \
+                  DOCKER_USER="$DOCKER_USER" DOCKER_PASS="$DOCKER_PASS" \
+                  'bash -s' <<'PUSH_EOF'
+                set -euo pipefail
+                echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin "$REGISTRY"
+                docker push "${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}"
+                docker logout "$REGISTRY" || true
+PUSH_EOF
+              '''
+            }
+          } else {
+            // Without Docker Hub login (public repo or already logged in)
+            withCredentials([sshUserPrivateKey(credentialsId: 'ec2b-ssh', keyFileVariable: 'KEYFILE')]) {
+              sh '''
+                set -euo pipefail
+                SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+                REMOTE="${B_USER}@${B_HOST}"
+
+                # --- BUILD on Instance B ---
+                ssh $SSH_OPTS -i "$KEYFILE" "$REMOTE" \
+                  REGISTRY="$REGISTRY" IMAGE_REPO="$IMAGE_REPO" IMAGE_TAG="$IMAGE_TAG" \
+                  'bash -s' <<'BUILD_EOF'
+                set -euo pipefail
+                cd ~/jenkins-ctx
+                rm -rf ctx && mkdir ctx
+                tar -xzf build-context.tgz -C ctx
+                cd ctx
+                docker --version
+                docker build -f docker/Dockerfile -t "${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}" .
+BUILD_EOF
+
+                # --- PUSH from Instance B (no login) ---
+                ssh $SSH_OPTS -i "$KEYFILE" "$REMOTE" \
+                  REGISTRY="$REGISTRY" IMAGE_REPO="$IMAGE_REPO" IMAGE_TAG="$IMAGE_TAG" \
+                  'bash -s' <<'PUSH_EOF'
+                set -euo pipefail
+                docker push "${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}"
+PUSH_EOF
+              '''
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    success { echo "Pushed: ${env.REGISTRY}/${env.IMAGE_REPO}:${env.IMAGE_TAG}" }
+  }
+}
+
