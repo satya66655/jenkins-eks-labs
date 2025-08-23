@@ -2,94 +2,67 @@ pipeline {
   agent any
 
   options {
+    ansiColor('xterm')
     timestamps()
   }
 
   parameters {
-    string(name: 'AWS_REGION',        defaultValue: 'us-east-1',       description: 'AWS region')
-    string(name: 'AMI_ID',            defaultValue: 'ami-0c7217cdde317cfec', description: 'Amazon Linux 2023 AMI (region-specific)')
-    string(name: 'INSTANCE_TYPE',     defaultValue: 't2.micro',        description: 'EC2 instance type for Instance B')
-    string(name: 'KEY_NAME',          defaultValue: 'my-key',          description: 'Existing EC2 key pair name')
-    string(name: 'SECURITY_GROUP_ID', defaultValue: 'sg-xxxxxxxx',     description: 'Security Group ID allowing 22 (and others as needed)')
-    string(name: 'SUBNET_ID',         defaultValue: 'subnet-xxxxxxxx', description: 'Subnet ID')
-    booleanParam(name: 'DRY_RUN', defaultValue: false, description: 'If true, skip provisioning stage')
+    string(name: 'IMAGE_REPO', defaultValue: 'satya66655/lab-app', description: 'Docker Hub repo (namespace/name)')
+    string(name: 'IMAGE_TAG',  defaultValue: 'v1', description: 'Image tag to push')
+    string(name: 'DOCKER_CONTEXT', defaultValue: '.', description: 'Build context')
+    string(name: 'DOCKERFILE', defaultValue: 'docker/Dockerfile', description: 'Path to Dockerfile')
   }
 
-  // ✅ Make params available to shell as env vars
   environment {
-    AWS_DEFAULT_REGION = "${params.AWS_REGION}"
-    AMI_ID            = "${params.AMI_ID}"
-    INSTANCE_TYPE     = "${params.INSTANCE_TYPE}"
-    KEY_NAME          = "${params.KEY_NAME}"
-    SECURITY_GROUP_ID = "${params.SECURITY_GROUP_ID}"
-    SUBNET_ID         = "${params.SUBNET_ID}"
+    REGISTRY = 'docker.io'
   }
 
   stages {
-    stage('Repo Info') {
+    stage('Checkout') {
       steps {
-        sh '''
-          set -e
-          echo "Workspace: $PWD"
-          git rev-parse --short HEAD || true
-          ls -la
-        '''
+        sshagent(credentials: ['github-ssh']) {
+          sh '''
+            if [ ! -d jenkins-eks-lab ]; then
+              git clone git@github.com:satya66655/jenkins-eks-lab.git
+            fi
+            cd jenkins-eks-lab
+            git fetch origin
+            git checkout main
+            git pull --rebase origin main
+          '''
+        }
       }
     }
 
-    stage('Prepare Env') {
-      steps {
-        sh '''
-          set -e
-          aws --version
-          chmod +x infra/ec2-b/*.sh
-        '''
-      }
-    }
-
-    stage('Provision EC2: Instance B') {
-      when { expression { return !params.DRY_RUN } }
-      steps {
-        // If NOT using an instance role, you can bind creds here:
-        // withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds-lab']]) { ... }
-
-        sh '''
-          set -euo pipefail
-
-          # Use the param-derived env vars
-          sed -i "s|^AMI_ID=.*|AMI_ID=\\"${AMI_ID}\\"|" infra/ec2-b/provision-ec2-b.sh
-          sed -i "s|^INSTANCE_TYPE=.*|INSTANCE_TYPE=\\"${INSTANCE_TYPE}\\"|" infra/ec2-b/provision-ec2-b.sh
-          sed -i "s|^KEY_NAME=.*|KEY_NAME=\\"${KEY_NAME}\\"|" infra/ec2-b/provision-ec2-b.sh
-          sed -i "s|^SECURITY_GROUP=.*|SECURITY_GROUP=\\"${SECURITY_GROUP_ID}\\"|" infra/ec2-b/provision-ec2-b.sh
-          sed -i "s|^SUBNET_ID=.*|SUBNET_ID=\\"${SUBNET_ID}\\"|" infra/ec2-b/provision-ec2-b.sh
-
-          ./infra/ec2-b/provision-ec2-b.sh | tee .jenkins/ec2b-output.txt
-        '''
-      }
-    }
-
-    stage('Capture Outputs') {
-      when { expression { return !params.DRY_RUN } }
+    stage('Docker Build') {
       steps {
         sh '''
           set -euo pipefail
-
-          INSTANCE_ID=$(grep -E "^Instance ID:" .jenkins/ec2b-output.txt | awk '{print $3}')
-          PUBLIC_IP=$(grep -E "^Public IP:"   .jenkins/ec2b-output.txt | awk '{print $3}')
-
-          echo "INSTANCE_ID=${INSTANCE_ID}" | tee .jenkins/ec2b.env
-          echo "PUBLIC_IP=${PUBLIC_IP}"     | tee -a .jenkins/ec2b.env
-
-          echo "Discovered Instance: $INSTANCE_ID"
-          echo "Public IP: $PUBLIC_IP"
+          cd jenkins-eks-lab
+          docker build -f "${DOCKERFILE}" -t "${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}" "${DOCKER_CONTEXT}"
+          docker image ls "${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}"
         '''
-        archiveArtifacts artifacts: '.jenkins/ec2b-*', fingerprint: true
+      }
+    }
+
+    stage('Docker Login & Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'dockerhub-satya', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+          sh '''
+            set -euo pipefail
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin "${REGISTRY}"
+            docker push "${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}"
+            docker logout "${REGISTRY}"
+          '''
+        }
       }
     }
   }
 
   post {
-    always { echo 'Build completed.' }
+    success {
+      echo "Pushed: ${REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}"
+    }
   }
 }
 
