@@ -1,0 +1,119 @@
+pipeline {
+  agent any
+  options { timestamps() }
+
+  parameters {
+    string(name: 'B_HOST', defaultValue: '<B_PUBLIC_IP>', description: 'Instance B public IP/DNS')
+    string(name: 'B_USER', defaultValue: 'ec2-user', description: 'SSH user on Instance B')
+    string(name: 'IMAGE',  defaultValue: 'docker.io/satya66655/lab-apps', description: 'Image repo')
+    string(name: 'TAG',    defaultValue: 'v1', description: 'Image tag')
+    booleanParam(name: 'LOGIN_BEFORE_PULL', defaultValue: false, description: 'docker login on Instance B first')
+    string(name: 'PORT',   defaultValue: '8080', description: 'Host port to publish')
+  }
+
+  environment { IMAGE_FULL = "${params.IMAGE}:${params.TAG}" }
+
+  stages {
+    stage('Deploy container on Instance B') {
+      steps {
+        script {
+          def SSHOPTS = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+          if (params.LOGIN_BEFORE_PULL) {
+            withCredentials([
+              sshUserPrivateKey(credentialsId: 'ec2b-ssh', keyFileVariable: 'KEYFILE'),
+              usernamePassword(credentialsId: 'dockerhub-satya', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')
+            ]) {
+              sh """
+                set -euo pipefail
+                REMOTE='${params.B_USER}@${params.B_HOST}'
+                ssh ${SSHOPTS} -i "\$KEYFILE" "\$REMOTE" IMAGE_FULL='${env.IMAGE_FULL}' PORT='${params.PORT}' DOCKER_USER="\$DOCKER_USER" DOCKER_PASS="\$DOCKER_PASS" 'bash -s' <<'EOF'
+                set -euo pipefail
+                echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                docker pull "$IMAGE_FULL"
+                docker rm -f lab-apps || true
+                docker run -d --name lab-apps -p "$PORT":8080 "$IMAGE_FULL"
+                docker logout || true
+EOF
+              """
+            }
+          } else {
+            withCredentials([sshUserPrivateKey(credentialsId: 'ec2b-ssh', keyFileVariable: 'KEYFILE')]) {
+              sh """
+                set -euo pipefail
+                REMOTE='${params.B_USER}@${params.B_HOST}'
+                ssh ${SSHOPTS} -i "\$KEYFILE" "\$REMOTE" IMAGE_FULL='${env.IMAGE_FULL}' PORT='${params.PORT}' 'bash -s' <<'EOF'
+                set -euo pipefail
+                docker pull "$IMAGE_FULL"
+                docker rm -f lab-apps || true
+                docker run -d --name lab-apps -p "$PORT":8080 "$IMAGE_FULL"
+EOF
+              """
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post { success { echo "Deployed ${env.IMAGE_FULL} on ${params.B_HOST}:${params.PORT}" } }
+}
+pipeline {
+  agent any
+  options { timestamps() }
+
+  parameters {
+    string(name: 'B_HOST', defaultValue: '<B_PUBLIC_IP>', description: 'Instance B public IP/DNS')
+    string(name: 'B_USER', defaultValue: 'ec2-user', description: 'SSH user on Instance B')
+    string(name: 'IMAGE',  defaultValue: 'docker.io/satya66655/lab-apps', description: 'Image repo')
+    string(name: 'TAG',    defaultValue: 'v1', description: 'Image tag')
+    booleanParam(name: 'LOGIN_BEFORE_PULL', defaultValue: false, description: 'docker login on Instance B first')
+    string(name: 'PORT',   defaultValue: '8080', description: 'Host port to publish')
+  }
+
+  environment { IMAGE_FULL = "${params.IMAGE}:${params.TAG}" }
+
+  stages {
+    stage('Deploy container on Instance B') {
+      steps {
+        script {
+          def SSHOPTS = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+          if (params.LOGIN_BEFORE_PULL) {
+            withCredentials([
+              sshUserPrivateKey(credentialsId: 'ec2b-ssh', keyFileVariable: 'KEYFILE'),
+              usernamePassword(credentialsId: 'dockerhub-satya', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')
+            ]) {
+              sh """
+                set -euo pipefail
+                REMOTE='${params.B_USER}@${params.B_HOST}'
+                ssh ${SSHOPTS} -i "\$KEYFILE" "\$REMOTE" IMAGE_FULL='${env.IMAGE_FULL}' PORT='${params.PORT}' DOCKER_USER="\$DOCKER_USER" DOCKER_PASS="\$DOCKER_PASS" 'bash -s' <<'EOF'
+                set -euo pipefail
+                echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                docker pull "$IMAGE_FULL"
+                docker rm -f lab-apps || true
+                docker run -d --name lab-apps -p "$PORT":8080 "$IMAGE_FULL"
+                docker logout || true
+EOF
+              """
+            }
+          } else {
+            withCredentials([sshUserPrivateKey(credentialsId: 'ec2b-ssh', keyFileVariable: 'KEYFILE')]) {
+              sh """
+                set -euo pipefail
+                REMOTE='${params.B_USER}@${params.B_HOST}'
+                ssh ${SSHOPTS} -i "\$KEYFILE" "\$REMOTE" IMAGE_FULL='${env.IMAGE_FULL}' PORT='${params.PORT}' 'bash -s' <<'EOF'
+                set -euo pipefail
+                docker pull "$IMAGE_FULL"
+                docker rm -f lab-apps || true
+                docker run -d --name lab-apps -p "$PORT":8080 "$IMAGE_FULL"
+EOF
+              """
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post { success { echo "Deployed ${env.IMAGE_FULL} on ${params.B_HOST}:${params.PORT}" } }
+}
+
